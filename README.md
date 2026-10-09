@@ -2,6 +2,8 @@
 
 **Версия:** `0.1.0-beta.2`. Одна публичная доска мира: карточки NPC, редактируемые игроками связи, стикеры и области. Игровая система не влияет на формат данных. Для записи игроками нужен подключённый GM.
 
+Публичные ссылки: [исходный код](https://github.com/Jerrvik/niti-board), [Manifest URL](https://raw.githubusercontent.com/Jerrvik/niti-board/main/src/niti-board/module.json), [BETA Release](https://github.com/Jerrvik/niti-board/releases/tag/v0.1.0-beta.2), [установочный ZIP](https://github.com/Jerrvik/niti-board/releases/download/v0.1.0-beta.2/niti-board.zip).
+
 ## Установка
 
 1. Сделайте резервную копию мира. Эта BETA испытана в тестовом мире Foundry **14.364**; билд 14.361 пока не проверен.
