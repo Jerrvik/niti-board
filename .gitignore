@@ -2,3 +2,8 @@ dist/
 node_modules/
 *.log
 .DS_Store
+AGENTS.md
+CODEX_START_RU.md
+ЗАДАНИЕ_ВСТАВИТЬ_В_CODEX.md
+docs/GITHUB_RELEASE_RU.md
+docs/ПЕРЕДАЧА_МАСТЕРУ_RU.md
