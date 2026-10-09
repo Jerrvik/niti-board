@@ -1,0 +1,14 @@
+#niti-launcher {position:fixed;bottom:102px;left:80px;z-index:150;display:flex;align-items:center;gap:7px;color:#f0dce1;background:#241e29;border:1px solid #875966;border-radius:9px;padding:10px 14px;box-shadow:0 6px 25px #000a;font-size:14px;font-weight:700;cursor:pointer;font-family:Segoe UI,Arial,sans-serif}
+#niti-launcher:hover {background:#44303d;border-color:#c08a98}
+#niti-board-window {position:fixed;top:8vh;left:3vw;width:69vw;height:82vh;min-width:620px;min-height:450px;z-index:1100;background:#121015;border:1px solid #795c6a;border-radius:10px;box-shadow:0 20px 80px #000c;display:flex;flex-direction:column;overflow:hidden;color:#e9dde6; font-family:Segoe UI,Arial,sans-serif}
+#niti-board-window[hidden] {display:none!important}
+#niti-board-window .niti-window-header{height:36px;display:flex;align-items:center;gap:12px;padding:0 9px 0 15px;flex-shrink:0;background:#221c25;border-bottom:1px solid #654f5b;cursor:move;user-select:none}
+#niti-board-window .niti-window-header strong{font-size:13px;flex:1;color:#e8d8df;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#niti-board-window .niti-window-header small{font-size:10px;color:#beaab5}
+#niti-board-window button.niti-shell-button{border:1px solid #69535d;background:#322831;color:#ddd0d8;border-radius:5px;padding:3px 10px;cursor:pointer}
+#niti-board-window button.niti-shell-button:hover{background:#604350}
+#niti-board-window iframe{border:0;flex:1;width:100%;background:#141218}
+#niti-board-window .niti-drop-overlay{display:none;position:absolute;inset:36px 0 0;z-index:5;background:#3a2539aa;border:3px dashed #d9a6b8;color:#fff;align-items:center;justify-content:center;font-size:19px;font-weight:700;pointer-events:auto}
+#niti-board-window.niti-external-drag .niti-drop-overlay{display:flex}
+#niti-board-window .niti-resize{position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;border-bottom:3px solid #a47783;border-right:3px solid #a47783;opacity:.65}
+@media(max-width:700px){#niti-board-window{min-width:0!important;left:0!important;top:0!important;width:100vw!important;height:90vh!important}}

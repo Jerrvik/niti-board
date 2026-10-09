@@ -1,0 +1,17 @@
+{
+  "id": "niti-board",
+  "title": "Нити — Доска связей (BETA)",
+  "description": "Совместная доска NPC, стрелок, связей, заметок и групп для Foundry VTT 14. Тестовая сборка без секретного слоя.",
+  "version": "0.1.0-beta.2",
+  "type": "module",
+  "authors": [{"name": "Jerrvik"}],
+  "compatibility": {"minimum": "14", "verified": "14.364"},
+  "url": "https://github.com/Jerrvik/niti-board",
+  "manifest": "https://raw.githubusercontent.com/Jerrvik/niti-board/main/src/niti-board/module.json",
+  "download": "https://github.com/Jerrvik/niti-board/releases/download/v0.1.0-beta.2/niti-board.zip",
+  "socket": true,
+  "esmodules": ["scripts/module.js"],
+  "styles": ["styles/module.css"],
+  "languages": [ {"lang": "ru", "name": "Русский", "path": "lang/ru.json"} ],
+  "media": []
+}
