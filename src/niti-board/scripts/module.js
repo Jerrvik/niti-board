@@ -7,12 +7,15 @@ const copy=x=>JSON.parse(JSON.stringify(x));
 const isLead=()=>game.users.activeGM?.id===game.user.id;
 const post=(kind,extra={})=>frame?.contentWindow?.postMessage({niti:true,kind,...extra},location.origin);
 const status=()=>post('AVAILABILITY',{readOnly:!game.users.activeGM,gm:game.user.isGM});
+const applyTheme=value=>{const theme=value==='fantasy'?'fantasy':'gothic';document.body.dataset.nitiTheme=theme;post('THEME',{theme});};
 
 Hooks.once('init',()=>{
   game.settings.register(ID,'board',{name:'Общая доска',scope:'world',config:false,type:Object,default:EMPTY(),onChange:value=>{
     try{board=cleanBoard(value);if(!activeRequest)post('STATE',{board:copy(board),readOnly:!game.users.activeGM,gm:game.user.isGM});}
     catch(error){console.error('[Нити] Повреждённое состояние доски',error);post('WARN',{text:'Ошибка загрузки доски. Сообщи мастеру.'});}
   }});
+  game.settings.register(ID,'theme',{name:'Тема доски «Нити»',hint:'Общая тема для всех участников мира. Меняет только оформление.',scope:'world',config:true,restricted:true,type:String,choices:{gothic:'Готическая',fantasy:'Фэнтези'},default:'gothic',onChange:applyTheme});
+  game.settings.register(ID,'launcherPosition',{name:'Положение значка «Нити»',scope:'user',config:false,type:Object,default:{}});
   CONFIG.queries[QUERY]=proposal=>{
     if(!isLead())throw Error('Этот клиент больше не активный GM');
     const task=queue.then(()=>accept(proposal));
@@ -30,6 +33,7 @@ Hooks.once('ready',()=>{
   window.addEventListener('message',onFrameMessage);
   Hooks.on('userConnected',()=>status());
   attachUI();
+  applyTheme(game.settings.get(ID,'theme'));
 });
 
 async function accept(proposal) {
@@ -96,7 +100,7 @@ async function submit(patch,base,baseRevision) {
 function onFrameMessage(event) {
   if(event.origin!==location.origin||event.source!==frame?.contentWindow||event.data?.niti!==true)return;
   const msg=event.data;
-  if(msg.kind==='READY')post('STATE',{board:copy(board),gm:game.user.isGM,readOnly:!game.users.activeGM});
+  if(msg.kind==='READY'){post('STATE',{board:copy(board),gm:game.user.isGM,readOnly:!game.users.activeGM});post('THEME',{theme:game.settings.get(ID,'theme')});}
   if(msg.kind==='PATCH') {
     if(activeRequest){post('ERROR',{text:'Дождись подтверждения предыдущего изменения.',board:copy(board)});return;}
     submit(msg.patch,msg.base,msg.baseRevision);
@@ -113,8 +117,25 @@ async function importActor(payload) {
 
 function attachUI() {
   const launch=document.createElement('button');launch.id='niti-launcher';launch.type='button';launch.textContent='⌁  Нити · доска';launch.title='Открыть общую доску';document.body.appendChild(launch);
+  let launcherPosition={};try{launcherPosition=game.settings.get(ID,'launcherPosition')||{};}catch(error){console.warn('[Нити] Положение значка не загружено',error)}
+  const clampLauncher=(x,y)=>({x:Math.max(0,Math.min(Math.max(0,innerWidth-launch.offsetWidth),Math.round(x))),y:Math.max(0,Math.min(Math.max(0,innerHeight-launch.offsetHeight),Math.round(y)))});
+  const placeLauncher=(x,y)=>{const p=clampLauncher(x,y);Object.assign(launch.style,{left:p.x+'px',top:p.y+'px',bottom:'auto'});return p};
+  if(Number.isFinite(launcherPosition.x)&&Number.isFinite(launcherPosition.y))placeLauncher(launcherPosition.x,launcherPosition.y);
+  else placeLauncher(80,innerHeight-launch.offsetHeight-102);
+  window.addEventListener('resize',()=>{const r=launch.getBoundingClientRect();placeLauncher(r.left,r.top)});
+  let suppressLauncherClick=false;
+  launch.addEventListener('pointerdown',e=>{
+    if(e.button!==0)return;
+    const r=launch.getBoundingClientRect(),start={x:e.clientX,y:e.clientY,left:r.left,top:r.top};
+    let moved=false;
+    const move=event=>{const dx=event.clientX-start.x,dy=event.clientY-start.y;if(!moved&&Math.hypot(dx,dy)<5)return;moved=true;launch.classList.add('niti-dragging');placeLauncher(start.left+dx,start.top+dy)};
+    const cleanup=()=>{window.removeEventListener('pointermove',move,true);window.removeEventListener('pointerup',end,true);window.removeEventListener('pointercancel',cancel,true);launch.classList.remove('niti-dragging')};
+    const cancel=()=>cleanup();
+    const end=()=>{cleanup();if(!moved)return;suppressLauncherClick=true;setTimeout(()=>{suppressLauncherClick=false},0);const x=Number.parseFloat(launch.style.left),y=Number.parseFloat(launch.style.top);game.settings.set(ID,'launcherPosition',placeLauncher(x,y)).catch(error=>ui.notifications.warn('Нити: положение значка не сохранено: '+error.message))};
+    window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',end,true);window.addEventListener('pointercancel',cancel,true);
+  });
   const root=document.createElement('section');root.id='niti-board-window';root.hidden=true;
-  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — общая доска связей <small>0.1.0-beta.2</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Общая доска Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
+  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — общая доска связей <small>0.2.0-beta.1</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Общая доска Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
   document.body.appendChild(root);frame=root.querySelector('iframe');
   fetch('modules/niti-board/ui/board.html',{cache:'no-store'}).then(response=>{if(!response.ok)throw Error(`HTTP ${response.status}`);return response.text()}).then(html=>{
     frame.srcdoc=html.replace('<html lang="ru">','<html lang="ru" data-niti-foundry="true">');
@@ -122,14 +143,14 @@ function attachUI() {
   const overlay=root.querySelector('.niti-drop-overlay');
   document.addEventListener('dragstart',event=>{
     if(root.hidden)return;
-    let drag={};try{drag=foundry.applications.ux.TextEditor.getDragEventData(event)}catch{}
+    let drag={};try{drag=(foundry?.applications?.ux?.TextEditor||globalThis.TextEditor).getDragEventData(event)}catch{}
     if(drag.type==='Actor')root.classList.add('niti-external-drag');
   },false);
   document.addEventListener('dragend',()=>root.classList.remove('niti-external-drag'),true);
   overlay.addEventListener('dragover',event=>{event.preventDefault();event.dataTransfer.dropEffect='copy';});
   overlay.addEventListener('drop',event=>{
     event.preventDefault();root.classList.remove('niti-external-drag');
-    const drag=foundry.applications.ux.TextEditor.getDragEventData(event);
+    const drag=(foundry?.applications?.ux?.TextEditor||globalThis.TextEditor).getDragEventData(event);
     if(drag.type!=='Actor')return;
     const r=frame.getBoundingClientRect();
     importActor({uuid:drag.uuid,id:drag.id,x:event.clientX-r.left,y:event.clientY-r.top}).catch(error=>post('WARN',{text:error.message}));
@@ -137,7 +158,7 @@ function attachUI() {
   let saved;try{saved=JSON.parse(localStorage.getItem('niti-board-window-v1')||'null')}catch{}
   if(saved)for(const key of ['left','top','width','height'])if(/^\d+(?:\.\d+)?(?:px|vw|vh)$/.test(saved[key]||''))root.style[key]=saved[key];
   const keep=()=>localStorage.setItem('niti-board-window-v1',JSON.stringify(Object.fromEntries(['left','top','width','height'].map(k=>[k,root.style[k]]))));
-  launch.addEventListener('click',()=>{root.hidden=!root.hidden;launch.setAttribute('aria-expanded',String(!root.hidden));if(!root.hidden)post('OPEN');});
+  launch.addEventListener('click',()=>{if(suppressLauncherClick){suppressLauncherClick=false;return}root.hidden=!root.hidden;launch.setAttribute('aria-expanded',String(!root.hidden));if(!root.hidden)post('OPEN');});
   root.querySelector('[data-action=close]').addEventListener('click',()=>{root.hidden=true;launch.setAttribute('aria-expanded','false');});
   let expanded=false;root.querySelector('[data-action=expand]').addEventListener('click',()=>{
     if(!expanded){root.dataset.old=JSON.stringify(Object.fromEntries(['left','top','width','height'].map(k=>[k,root.style[k]])));Object.assign(root.style,{left:'1vw',top:'2vh',width:'98vw',height:'94vh'});}

@@ -1,23 +1,32 @@
 // Pure board model and input limits. No Foundry globals: unit-testable under Node.
 export const EMPTY = () => ({nodes: [], edges: [], revision: 0});
+export const LEGACY_ZONE_COLOR = '#856a7b';
 export const confirmsProposal = (pending,candidate)=>!!pending&&JSON.stringify(pending)===JSON.stringify(candidate);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(Number(v)) ? Number(v) : lo));
 const txt = (x, max) => String(x ?? "").slice(0, max);
 const color = (x) => /^#[0-9a-f]{6}$/i.test(x ?? "") ? x : "#be6b78";
 const validId = (x) => typeof x === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(x);
+export function validPhotoPath(path) {
+  if(typeof path!=="string"||!path.trim()||path.length>100000||/[\u0000-\u001f<>"'\\]/.test(path))return false;
+  if(/^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+$/i.test(path))return true;
+  if(/^https?:\/\/[^/]+/i.test(path))return true;
+  return !/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(path);
+}
 export function cleanNode(x) {
   if (!x || typeof x !== "object" || !validId(x.id) || !["card","note","zone"].includes(x.type)) return null;
   const o = {id:x.id,type:x.type,x:clamp(x.x,0,2500),y:clamp(x.y,0,1650)};
   if(x.type === "card") {
     const p = txt(x.photo, 100000);
     o.title=txt(x.title,80);o.subtitle=txt(x.subtitle,110);o.compact=!!x.compact;
-    o.photo = /^(?:https?:\/\/[^\s<>"']+|\/(?!\/)[^\s<>"']+|(?:icons|systems|modules|worlds|assets|uploads)\/[^\s<>"']+|data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/=]+)$/i.test(p) ? p : "";
+    o.photo = validPhotoPath(p) ? p : "";
     o.actorUuid=txt(x.actorUuid,180);
     o.locked=!!x.locked;
+    o.zoneId=validId(x.zoneId)?x.zoneId:'';
   } else if (x.type === "note") {
     o.title=txt(x.title,120);o.body=txt(x.body,1500);
     o.color=["yellow","pink","blue","green"].includes(x.color)?x.color:"yellow";
-  } else {o.title=txt(x.title,85);o.w=clamp(x.w,180,1500);o.h=clamp(x.h,130,1200);}
+    o.zoneId=validId(x.zoneId)?x.zoneId:'';
+  } else {o.title=txt(x.title,85);o.w=clamp(x.w,180,1500);o.h=clamp(x.h,130,1200);o.color=color(x.color??LEGACY_ZONE_COLOR);}
   return o;
 }
 export function cleanEdge(x) {
@@ -49,6 +58,8 @@ export function cleanBoard(input) {
   if(new Set(nodes.map(x=>x.id)).size!==nodes.length||new Set(edges.map(x=>x.id)).size!==edges.length)throw Error('Повторяющиеся ID');
   const ids=new Set(nodes.map(x=>x.id));
   if(edges.some(x=>!ids.has(x.from)||!ids.has(x.to)))throw Error('Связь с отсутствующей карточкой');
+  const zoneIds=new Set(nodes.filter(x=>x.type==='zone').map(x=>x.id));
+  if(nodes.some(x=>x.zoneId&&!zoneIds.has(x.zoneId)))throw Error('Привязка к отсутствующей области');
   const board={nodes,edges,revision:Number.isSafeInteger(input.revision)&&input.revision>=0?input.revision:0};
   if(JSON.stringify(board).length>750000)throw Error('Достигнут лимит размера доски (750 КБ)');
   return board;
@@ -76,6 +87,11 @@ export function checkProposal(current, proposal, {isGM=false}={}) {
   for(const op of patch.nodes)if(op.value===null){
     const undeclared=current.edges.find(edge=>(edge.from===op.id||edge.to===op.id)&&!patch.edges.some(change=>change.id===edge.id&&change.value===null));
     if(undeclared)throw Error('Конфликт: к карточке добавлена связь. Обнови доску.');
+    const zone=current.nodes.find(node=>node.id===op.id&&node.type==='zone');
+    if(zone){
+      const attached=current.nodes.find(node=>node.zoneId===zone.id&&!patch.nodes.some(change=>change.id===node.id&&change.value?.zoneId!==zone.id));
+      if(attached)throw Error('Конфликт: в области есть объект. Обнови доску.');
+    }
   }
   const next=applyPatch(current,patch);
   for(const op of patch.edges)if(op.value&&!next.edges.some(x=>x.id===op.id))throw Error('Конечная карточка связи удалена');
@@ -91,6 +107,8 @@ export function applyPatch(input, patch) {
   };
   board.nodes=patchList(board.nodes||[],patch.nodes);
   board.edges=patchList(board.edges||[],patch.edges).filter(e=>board.nodes.some(n=>n.id===e.from)&&board.nodes.some(n=>n.id===e.to));
+  const zoneIds=new Set(board.nodes.filter(n=>n.type==='zone').map(n=>n.id));
+  if(board.nodes.some(n=>n.zoneId&&!zoneIds.has(n.zoneId)))throw Error('Привязка к отсутствующей области');
   if(board.nodes.length>400||board.edges.length>900)throw Error("Доска слишком большая");
   if(JSON.stringify(board).length>750000)throw Error("Достигнут лимит размера доски (750 КБ)");
   return board;

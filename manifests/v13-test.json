@@ -1,0 +1,17 @@
+{
+  "id": "niti-board",
+  "title": "Нити — Доска связей (BETA, тест V13)",
+  "description": "Тестовая сборка общей доски для проверки в Foundry VTT 13. Совместимость с V13 пока не подтверждена реальным испытанием.",
+  "version": "0.2.0-beta.1",
+  "type": "module",
+  "authors": [{"name": "Jerrvik"}],
+  "compatibility": {"minimum": "13", "maximum": "13"},
+  "url": "https://github.com/Jerrvik/niti-board",
+  "manifest": "https://raw.githubusercontent.com/Jerrvik/niti-board/main/manifests/v13-test.json",
+  "download": "https://github.com/Jerrvik/niti-board/releases/download/v0.2.0-beta.1/niti-board-v13-test.zip",
+  "socket": true,
+  "esmodules": ["scripts/module.js"],
+  "styles": ["styles/module.css"],
+  "languages": [{"lang": "ru", "name": "Русский", "path": "lang/ru.json"}],
+  "media": []
+}
