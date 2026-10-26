@@ -25,15 +25,15 @@ async function derive(passphrase,salt){
   return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:250000,hash:'SHA-256'},material,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
 }
 
-export async function createVault(passphrase){
+export async function createVault(passphrase,version=1){
   if(typeof passphrase!=='string'||passphrase.length<16)throw Error('Пароль личных досок должен содержать не менее 16 символов');
   const salt=crypto.getRandomValues(new Uint8Array(16)),key=await derive(passphrase,salt);
-  const envelope=await sealVault({boards:[]},key,bytesToBase64(salt));
+  const envelope=await sealVault({boards:[]},key,bytesToBase64(salt),version);
   return {key,envelope};
 }
 
 export async function openVault(envelope,passphrase){
-  if(envelope?.version!==1||typeof envelope.salt!=='string'||typeof envelope.iv!=='string'||typeof envelope.data!=='string')throw Error('Неверный формат личных досок');
+  if(![1,2].includes(envelope?.version)||typeof envelope.salt!=='string'||typeof envelope.iv!=='string'||typeof envelope.data!=='string')throw Error('Неверный формат личных досок');
   const key=await derive(passphrase,base64ToBytes(envelope.salt));
   return {key,vault:await openVaultWithKey(envelope,key)};
 }
@@ -45,8 +45,8 @@ export async function openVaultWithKey(envelope,key){
   }catch{throw Error('Неверный пароль или повреждённое хранилище личных досок')}
 }
 
-export async function sealVault(vault,key,salt){
+export async function sealVault(vault,key,salt,version=1){
   const clean=cleanVault(vault),iv=crypto.getRandomValues(new Uint8Array(12));
   const data=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,encoder.encode(JSON.stringify(clean)));
-  return {version:1,salt,iv:bytesToBase64(iv),data:bytesToBase64(new Uint8Array(data))};
+  return {version,salt,iv:bytesToBase64(iv),data:bytesToBase64(new Uint8Array(data))};
 }

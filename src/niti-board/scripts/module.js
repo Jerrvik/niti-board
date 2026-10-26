@@ -7,8 +7,14 @@ let board=EMPTY(), currentId=LEGACY_BOARD_ID, frame, queue=Promise.resolve(), ac
 const localProposals=new Map(), results=new Map();
 const privateCache=new Map();
 let vaultCache=null,vaultKey=null;
+let vaultInit=null,migrationPending=null;
 const copy=x=>JSON.parse(JSON.stringify(x));
 const isLead=()=>game.users.activeGM?.id===game.user.id;
+const worldId=()=>String(game.world?.id||'world');
+const autoKeyName=()=>`${ID}.vault-key.${worldId()}.${game.user.id}`;
+const autoSecret=()=>localStorage.getItem(autoKeyName());
+const saveAutoSecret=secret=>{localStorage.setItem(autoKeyName(),secret);if(autoSecret()!==secret)throw Error('Не удалось сохранить ключ личных досок в браузере GM')};
+const randomSecret=()=>btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))));
 const post=(kind,extra={})=>frame?.contentWindow?.postMessage({niti:true,kind,...extra},location.origin);
 const status=()=>post('AVAILABILITY',{readOnly:!game.users.activeGM,gm:game.user.isGM});
 const applyTheme=value=>{const theme=value==='fantasy'?'fantasy':'gothic';document.body.dataset.nitiTheme=theme;post('THEME',{theme});};
@@ -44,11 +50,11 @@ function onJournalChanged(doc){
   if(doc.id===currentId&&!activeRequest)showBoard(currentId,{remember:false});
 }
 
-function askVaultPassword(create){
+function askVaultPassword(){
   return new Promise((resolve,reject)=>{
     const dialog=document.createElement('dialog');
     dialog.style.cssText='border:1px solid #806573;border-radius:9px;background:#24212b;color:#eee5ea;max-width:min(400px,90vw);padding:20px;box-shadow:0 18px 55px #0009';
-    dialog.innerHTML=`<form><h2 style="margin:0 0 12px;font:600 18px Georgia,serif">Личные доски «Нити»</h2><p style="line-height:1.45">${create?'Задай пароль длиной не менее 16 символов и сохрани его отдельно. Без него личные доски нельзя восстановить.':'Введи пароль личных досок, чтобы открыть их участникам.'}</p><input type="password" autocomplete="off" required minlength="16" placeholder="Пароль" style="width:100%;padding:8px;margin:6px 0">${create?'<input type="password" autocomplete="off" required minlength="16" placeholder="Повтори пароль" style="width:100%;padding:8px;margin:6px 0">':''}<p class="niti-vault-error" style="min-height:1.2em;color:#f3a2a2"></p><div style="display:flex;justify-content:flex-end;gap:8px"><button type="button" data-cancel>Отмена</button><button type="submit">${create?'Создать':'Открыть'}</button></div></form>`;
+    dialog.innerHTML='<form><h2 style="margin:0 0 12px;font:600 18px Georgia,serif">Перенос личных досок</h2><p style="line-height:1.45">Один раз введи старый пароль для переноса. После этого личные доски будут открываться автоматически.</p><input type="password" autocomplete="off" required minlength="16" placeholder="Старый пароль" style="width:100%;padding:8px;margin:6px 0"><p class="niti-vault-error" style="min-height:1.2em;color:#f3a2a2"></p><div style="display:flex;justify-content:flex-end;gap:8px"><button type="button" data-cancel>Отмена</button><button type="submit">Перенести</button></div></form>';
     document.body.appendChild(dialog);
     const finish=(value,error)=>{dialog.close();dialog.remove();if(error)reject(error);else resolve(value)};
     dialog.querySelector('[data-cancel]').addEventListener('click',()=>finish(null,Error('GM отменил разблокировку личных досок')));
@@ -56,34 +62,52 @@ function askVaultPassword(create){
     dialog.querySelector('form').addEventListener('submit',event=>{
       event.preventDefault();const fields=[...dialog.querySelectorAll('input')],passphrase=fields[0].value;
       if(passphrase.length<16){dialog.querySelector('.niti-vault-error').textContent='Нужно не менее 16 символов';return}
-      if(create&&passphrase!==fields[1].value){dialog.querySelector('.niti-vault-error').textContent='Пароли не совпали';return}
       finish(passphrase);
     });
     dialog.showModal();dialog.querySelector('input').focus();
   });
 }
-async function unlockVault({create=false,interactive=false}={}){
+async function unlockVault({interactive=false}={}){
   if(!isLead())throw Error('Личные доски доступны только через активного GM');
-  if(vaultCache&&(!create||vaultKey))return vaultCache;
+  if(vaultCache&&vaultKey)return vaultCache;
   const envelope=game.settings.get(ID,'privateVault')||{};
-  if(envelope.version!==1){
-    if(!create){vaultCache={boards:[]};return vaultCache;}
-    if(!interactive)throw Error('GM должен нажать «Открыть личные доски» в панели «Нити»');
-    const passphrase=await askVaultPassword(true);
-    const created=await createVault(passphrase);vaultKey=created.key;vaultCache={boards:[]};
-    await game.settings.set(ID,'privateVault',created.envelope);
-  }else{
-    if(!interactive)throw Error('GM должен нажать «Открыть личные доски» в панели «Нити»');
-    const passphrase=await askVaultPassword(false);
-    const opened=await openVault(envelope,passphrase);vaultKey=opened.key;vaultCache=opened.vault;
+  if(envelope.version===1){
+    if(!interactive)throw Error('GM переносит старые личные доски. Для них требуется старый пароль один раз.');
+    if(migrationPending)return migrationPending;
+    migrationPending=(async()=>{
+      const opened=await openVault(envelope,await askVaultPassword());
+      const secret=randomSecret(),created=await createVault(secret,2);
+      const converted=await sealVault(opened.vault,created.key,created.envelope.salt,2);
+      saveAutoSecret(secret);
+      await game.settings.set(ID,'privateVaultBackup',envelope);
+      await game.settings.set(ID,'privateVault',converted);
+      vaultKey=created.key;vaultCache=opened.vault;
+      privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
+      sendList();return vaultCache;
+    })();
+    try{return await migrationPending}finally{migrationPending=null}
   }
-  privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
-  sendList();return vaultCache;
+  if(vaultInit)return vaultInit;
+  vaultInit=(async()=>{
+    if(envelope.version===2){
+      const secret=autoSecret();
+      if(!secret)throw Error('Ключ личных досок не найден в браузере GM. Нужна резервная копия ключа.');
+      const opened=await openVault(envelope,secret);vaultKey=opened.key;vaultCache=opened.vault;
+    }else{
+      const secret=randomSecret(),created=await createVault(secret,2);
+      saveAutoSecret(secret);
+      await game.settings.set(ID,'privateVault',created.envelope);
+      vaultKey=created.key;vaultCache={boards:[]};
+    }
+    privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
+    sendList();return vaultCache;
+  })();
+  try{return await vaultInit}finally{vaultInit=null}
 }
 async function saveVault(){
   if(!vaultKey||!vaultCache)throw Error('Личные доски не разблокированы');
   const envelope=game.settings.get(ID,'privateVault');
-  try{await game.settings.set(ID,'privateVault',await sealVault(vaultCache,vaultKey,envelope.salt));}
+  try{await game.settings.set(ID,'privateVault',await sealVault(vaultCache,vaultKey,envelope.salt,envelope.version));}
   catch(error){
     vaultCache=await openVaultWithKey(game.settings.get(ID,'privateVault'),vaultKey);
     privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
@@ -91,6 +115,19 @@ async function saveVault(){
   }
   privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
   sendList();
+}
+async function importVaultKey(payload){
+  if(!game.user.isGM)throw Error('Восстановление ключа доступно только GM');
+  if(payload?.module!==ID||payload.version!==1||payload.worldId!==worldId()||typeof payload.secret!=='string'||payload.secret.length>100)throw Error('Ключ не относится к этому миру');
+  const envelope=game.settings.get(ID,'privateVault');
+  if(envelope?.version!==2)throw Error('Автоматическое хранилище ещё не создано');
+  const opened=await openVault(envelope,payload.secret);
+  saveAutoSecret(payload.secret);
+  if(isLead()){
+    vaultKey=opened.key;vaultCache=opened.vault;
+    privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
+    sendList();game.socket.emit(`module.${ID}`,{kind:'vault-ready'});
+  }
 }
 async function askGM(kind,payload={}){
   const gm=game.users.activeGM;if(!gm)throw Error('Нет подключённого GM');
@@ -130,6 +167,7 @@ Hooks.once('init',()=>{
   game.settings.register(ID,'privateVault',{name:'Зашифрованные личные доски «Нити»',scope:'world',config:false,restricted:true,type:Object,default:{},onChange:()=>{
     if(!isLead()&&privateCache.size&&!activeRequest)refreshPrivate();
   }});
+  game.settings.register(ID,'privateVaultBackup',{name:'Резерв старых личных досок «Нити»',scope:'world',config:false,restricted:true,type:Object,default:{}});
   CONFIG.queries[QUERY]=proposal=>{
     if(!isLead())throw Error('Этот клиент больше не активный GM');
     const task=queue.then(()=>accept(proposal));
@@ -144,13 +182,19 @@ Hooks.once('init',()=>{
 
 Hooks.once('ready',()=>{
   window.addEventListener('message',onFrameMessage);
-  game.socket.on(`module.${ID}`,message=>{if(message?.kind==='vault-ready'&&!isLead())refreshPrivate({readCurrent:false})});
+  game.socket.on(`module.${ID}`,message=>{
+    if(message?.kind!=='vault-ready'||isLead())return;
+    if(game.user.isGM)askGM('key').then(answer=>saveAutoSecret(answer.secret)).catch(error=>console.warn('[Нити] Ключ GM не получен',error));
+    refreshPrivate({readCurrent:false});
+  });
   Hooks.on('userConnected',()=>{status();if(!isLead())refreshPrivate({readCurrent:false});});
   for(const name of ['createJournalEntry','updateJournalEntry','deleteJournalEntry'])Hooks.on(name,onJournalChanged);
   attachUI();
   applyTheme(game.settings.get(ID,'theme'));
   showBoard(game.settings.get(ID,'lastBoard'),{remember:false});
   refreshPrivate({readCurrent:false});
+  if(isLead())unlockVault({interactive:true}).then(()=>game.socket.emit(`module.${ID}`,{kind:'vault-ready'})).catch(error=>post('WARN',{text:error.message}));
+  else if(game.user.isGM)askGM('key').then(answer=>saveAutoSecret(answer.secret)).catch(error=>console.warn('[Нити] Ключ GM не получен',error));
 });
 
 async function accept(proposal) {
@@ -166,7 +210,11 @@ async function accept(proposal) {
   }
   if(results.has(key))return copy(results.get(key));
   let answer;
-  if(proposal.kind==='list'){
+  if(proposal.kind==='key'){
+    if(!author.isGM)throw Error('Ключ доступен только GM');
+    await unlockVault();
+    answer={opId:proposal.opId,kind:'key',secret:autoSecret()};
+  } else if(proposal.kind==='list'){
     const vault=await unlockVault();
     answer={opId:proposal.opId,kind:'list',boards:vault.boards.filter(entry=>mayRead(entry,author)).map(({id,title,visibility,ownerId})=>({id,title,visibility,ownerId}))};
   } else if(proposal.kind==='read'){
@@ -299,6 +347,10 @@ function onFrameMessage(event) {
       post('BOARD_OK',{action:'unlock'});
     }).catch(error=>post('BOARD_ERROR',{text:error.message}));
   }
+  if(msg.kind==='IMPORT_VAULT_KEY'){
+    post('BOARD_WORKING',{action:'restore'});
+    importVaultKey(msg.payload).then(()=>post('BOARD_OK',{action:'restore'})).catch(error=>post('BOARD_ERROR',{text:error.message}));
+  }
   if(msg.kind==='PATCH') {
     if(msg.boardId!==currentId){post('ERROR',{text:'Выбрана другая доска',board:copy(board),boardId:currentId});return;}
     if(activeRequest){post('ERROR',{text:'Дождись подтверждения предыдущего изменения.',board:copy(board),boardId:currentId});return;}
@@ -344,7 +396,7 @@ function attachUI() {
     window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',end,true);window.addEventListener('pointercancel',cancel,true);
   });
   const root=document.createElement('section');root.id='niti-board-window';root.hidden=true;
-  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — доски связей <small>0.3.0-beta.2</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Доски Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
+  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — доски связей <small>0.3.0-beta.3</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Доски Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
   document.body.appendChild(root);frame=root.querySelector('iframe');
   fetch('modules/niti-board/ui/board.html',{cache:'no-store'}).then(response=>{if(!response.ok)throw Error(`HTTP ${response.status}`);return response.text()}).then(html=>{
     frame.srcdoc=html.replace('<html lang="ru">','<html lang="ru" data-niti-foundry="true">');
