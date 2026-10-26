@@ -3,6 +3,8 @@ export const EMPTY = () => ({nodes: [], edges: [], revision: 0});
 export const LEGACY_ZONE_COLOR = '#856a7b';
 export const confirmsProposal = (pending,candidate)=>!!pending&&JSON.stringify(pending)===JSON.stringify(candidate);
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, Number.isFinite(Number(v)) ? Number(v) : lo));
+// A safety limit for JSON/CSS coordinates, far beyond any useful board extent.
+const coordinate = v => Number.isFinite(Number(v)) ? clamp(v,-1000000000,1000000000) : 0;
 const txt = (x, max) => String(x ?? "").slice(0, max);
 const color = (x) => /^#[0-9a-f]{6}$/i.test(x ?? "") ? x : "#be6b78";
 const validId = (x) => typeof x === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(x);
@@ -14,7 +16,7 @@ export function validPhotoPath(path) {
 }
 export function cleanNode(x) {
   if (!x || typeof x !== "object" || !validId(x.id) || !["card","note","zone"].includes(x.type)) return null;
-  const o = {id:x.id,type:x.type,x:clamp(x.x,0,2500),y:clamp(x.y,0,1650)};
+  const o = {id:x.id,type:x.type,x:coordinate(x.x),y:coordinate(x.y)};
   if(x.type === "card") {
     const p = txt(x.photo, 100000);
     o.title=txt(x.title,80);o.subtitle=txt(x.subtitle,110);o.compact=!!x.compact;
