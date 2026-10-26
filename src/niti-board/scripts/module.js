@@ -44,20 +44,37 @@ function onJournalChanged(doc){
   if(doc.id===currentId&&!activeRequest)showBoard(currentId,{remember:false});
 }
 
-async function unlockVault({create=false}={}){
+function askVaultPassword(create){
+  return new Promise((resolve,reject)=>{
+    const dialog=document.createElement('dialog');
+    dialog.style.cssText='border:1px solid #806573;border-radius:9px;background:#24212b;color:#eee5ea;max-width:min(400px,90vw);padding:20px;box-shadow:0 18px 55px #0009';
+    dialog.innerHTML=`<form><h2 style="margin:0 0 12px;font:600 18px Georgia,serif">Личные доски «Нити»</h2><p style="line-height:1.45">${create?'Задай пароль длиной не менее 16 символов и сохрани его отдельно. Без него личные доски нельзя восстановить.':'Введи пароль личных досок, чтобы открыть их участникам.'}</p><input type="password" autocomplete="off" required minlength="16" placeholder="Пароль" style="width:100%;padding:8px;margin:6px 0">${create?'<input type="password" autocomplete="off" required minlength="16" placeholder="Повтори пароль" style="width:100%;padding:8px;margin:6px 0">':''}<p class="niti-vault-error" style="min-height:1.2em;color:#f3a2a2"></p><div style="display:flex;justify-content:flex-end;gap:8px"><button type="button" data-cancel>Отмена</button><button type="submit">${create?'Создать':'Открыть'}</button></div></form>`;
+    document.body.appendChild(dialog);
+    const finish=(value,error)=>{dialog.close();dialog.remove();if(error)reject(error);else resolve(value)};
+    dialog.querySelector('[data-cancel]').addEventListener('click',()=>finish(null,Error('GM отменил разблокировку личных досок')));
+    dialog.addEventListener('cancel',event=>{event.preventDefault();finish(null,Error('GM отменил разблокировку личных досок'))});
+    dialog.querySelector('form').addEventListener('submit',event=>{
+      event.preventDefault();const fields=[...dialog.querySelectorAll('input')],passphrase=fields[0].value;
+      if(passphrase.length<16){dialog.querySelector('.niti-vault-error').textContent='Нужно не менее 16 символов';return}
+      if(create&&passphrase!==fields[1].value){dialog.querySelector('.niti-vault-error').textContent='Пароли не совпали';return}
+      finish(passphrase);
+    });
+    dialog.showModal();dialog.querySelector('input').focus();
+  });
+}
+async function unlockVault({create=false,interactive=false}={}){
   if(!isLead())throw Error('Личные доски доступны только через активного GM');
   if(vaultCache&&(!create||vaultKey))return vaultCache;
   const envelope=game.settings.get(ID,'privateVault')||{};
   if(envelope.version!==1){
     if(!create){vaultCache={boards:[]};return vaultCache;}
-    const passphrase=window.prompt('Нити: придумай пароль личных досок (не менее 16 символов). Он нужен после перезапуска GM; сохрани его отдельно.');
-    if(!passphrase)throw Error('GM не задал пароль личных досок');
-    if(passphrase!==window.prompt('Повтори пароль личных досок'))throw Error('Пароли не совпали');
+    if(!interactive)throw Error('GM должен нажать «Открыть личные доски» в панели «Нити»');
+    const passphrase=await askVaultPassword(true);
     const created=await createVault(passphrase);vaultKey=created.key;vaultCache={boards:[]};
     await game.settings.set(ID,'privateVault',created.envelope);
   }else{
-    const passphrase=window.prompt('Нити: введи пароль личных досок, чтобы открыть их для участников');
-    if(!passphrase)throw Error('GM не разблокировал личные доски');
+    if(!interactive)throw Error('GM должен нажать «Открыть личные доски» в панели «Нити»');
+    const passphrase=await askVaultPassword(false);
     const opened=await openVault(envelope,passphrase);vaultKey=opened.key;vaultCache=opened.vault;
   }
   privateCache.clear();for(const entry of vaultCache.boards)privateCache.set(entry.id,entry);
@@ -127,6 +144,7 @@ Hooks.once('init',()=>{
 
 Hooks.once('ready',()=>{
   window.addEventListener('message',onFrameMessage);
+  game.socket.on(`module.${ID}`,message=>{if(message?.kind==='vault-ready'&&!isLead())refreshPrivate({readCurrent:false})});
   Hooks.on('userConnected',()=>{status();if(!isLead())refreshPrivate({readCurrent:false});});
   for(const name of ['createJournalEntry','updateJournalEntry','deleteJournalEntry'])Hooks.on(name,onJournalChanged);
   attachUI();
@@ -237,9 +255,9 @@ async function submit(kind,payload={}) {
   if(!gm){post(kind==='patch'?'ERROR':'BOARD_ERROR',{text:'Нет подключённого GM. Изменение не сохранено.',board:copy(board),boardId:currentId});return;}
   const proposal={opId:crypto.randomUUID().replaceAll('-',''),authorId:game.user.id,kind,...payload};
   localProposals.set(proposal.opId,copy(proposal));activeRequest=true;
-  if(kind==='patch')post('SAVING');
+  post(kind==='patch'?'SAVING':'BOARD_WORKING',{action:kind});
   try {
-    const answer=isLead()?await accept(proposal):await gm.query(QUERY,proposal,{timeout:60000});
+    const answer=isLead()?await accept(proposal):await gm.query(QUERY,proposal,{timeout:20000});
     if(kind==='patch'){
       if(answer.boardId!==currentId)throw Error('Ответ относится к другой доске');
       board=cleanBoard(answer.board);
@@ -258,9 +276,9 @@ async function submit(kind,payload={}) {
   } catch(error) {
     console.warn('[Нити] Сохранение не выполнено',error);
     if(kind==='patch'){
-      if(isPrivateId(currentId))try{const fresh=await askGM('read',{boardId:currentId});privateCache.set(currentId,{...fresh.meta,state:cleanBoard(fresh.board),views:{[game.user.id]:fresh.view}});}catch{}
       try{board=boardSource(currentId).state;}catch{}
-      post('ERROR',{text:`Не удалось сохранить: ${error.message}. Доска обновлена; повтори правку.`,board:copy(board),boardId:currentId});
+      post('ERROR',{text:`Не удалось сохранить: ${error.message}. Повтори правку после обновления доски.`,board:copy(board),boardId:currentId});
+      if(isPrivateId(currentId))openPrivate(currentId,{remember:false,quiet:false}).catch(refreshError=>console.warn('[Нити] Не удалось обновить личную доску',refreshError));
     } else post('BOARD_ERROR',{text:`Не удалось изменить список досок: ${error.message}`});
   } finally {
     localProposals.delete(proposal.opId);activeRequest=false;
@@ -274,6 +292,13 @@ function onFrameMessage(event) {
   if(event.origin!==location.origin||event.source!==frame?.contentWindow||event.data?.niti!==true)return;
   const msg=event.data;
   if(msg.kind==='READY'){showBoard(currentId,{remember:false});post('THEME',{theme:game.settings.get(ID,'theme')});}
+  if(msg.kind==='UNLOCK_PRIVATE'&&isLead()){
+    post('BOARD_WORKING',{action:'unlock'});
+    unlockVault({create:true,interactive:true}).then(()=>{
+      game.socket.emit(`module.${ID}`,{kind:'vault-ready'});
+      post('BOARD_OK',{action:'unlock'});
+    }).catch(error=>post('BOARD_ERROR',{text:error.message}));
+  }
   if(msg.kind==='PATCH') {
     if(msg.boardId!==currentId){post('ERROR',{text:'Выбрана другая доска',board:copy(board),boardId:currentId});return;}
     if(activeRequest){post('ERROR',{text:'Дождись подтверждения предыдущего изменения.',board:copy(board),boardId:currentId});return;}
@@ -319,7 +344,7 @@ function attachUI() {
     window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',end,true);window.addEventListener('pointercancel',cancel,true);
   });
   const root=document.createElement('section');root.id='niti-board-window';root.hidden=true;
-  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — доски связей <small>0.3.0-beta.1</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Доски Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
+  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — доски связей <small>0.3.0-beta.2</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Доски Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
   document.body.appendChild(root);frame=root.querySelector('iframe');
   fetch('modules/niti-board/ui/board.html',{cache:'no-store'}).then(response=>{if(!response.ok)throw Error(`HTTP ${response.status}`);return response.text()}).then(html=>{
     frame.srcdoc=html.replace('<html lang="ru">','<html lang="ru" data-niti-foundry="true">');
