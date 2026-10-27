@@ -1,6 +1,7 @@
 import {EMPTY, cleanBoard, checkProposal, confirmsProposal} from './model.js';
 import {LEGACY_BOARD_ID, BOARD_FLAG, boardTitle, boardMeta, mayRead, mayManage, boardOwnership, cleanView} from './boards.js';
 import {isPrivateId, createVault, openVault, openVaultWithKey, sealVault} from './vault.js';
+import {operationId,withDeadline} from './compat.js';
 
 const ID='niti-board', QUERY=`${ID}.propose`, CONFIRM=`${ID}.confirm`;
 let board=EMPTY(), currentId=LEGACY_BOARD_ID, frame, queue=Promise.resolve(), activeRequest=false;
@@ -131,9 +132,9 @@ async function importVaultKey(payload){
 }
 async function askGM(kind,payload={}){
   const gm=game.users.activeGM;if(!gm)throw Error('Нет подключённого GM');
-  const proposal={opId:crypto.randomUUID().replaceAll('-',''),authorId:game.user.id,kind,...payload};
+  const proposal={opId:operationId(),authorId:game.user.id,kind,...payload};
   localProposals.set(proposal.opId,copy(proposal));
-  try{return isLead()?await accept(proposal):await gm.query(QUERY,proposal,{timeout:60000});}
+  try{return await withDeadline(()=>isLead()?enqueueProposal(proposal,game.user):gm.query(QUERY,proposal,{timeout:15000}));}
   finally{localProposals.delete(proposal.opId)}
 }
 async function refreshPrivate({readCurrent=true}={}){
@@ -168,11 +169,9 @@ Hooks.once('init',()=>{
     if(!isLead()&&privateCache.size&&!activeRequest)refreshPrivate();
   }});
   game.settings.register(ID,'privateVaultBackup',{name:'Резерв старых личных досок «Нити»',scope:'world',config:false,restricted:true,type:Object,default:{}});
-  CONFIG.queries[QUERY]=proposal=>{
+  CONFIG.queries[QUERY]=(proposal,context={})=>{
     if(!isLead())throw Error('Этот клиент больше не активный GM');
-    const task=queue.then(()=>accept(proposal));
-    queue=task.catch(error=>console.warn('[Нити] Операция отклонена',error));
-    return task;
+    return enqueueProposal(proposal,context.user);
   };
   CONFIG.queries[CONFIRM]=challenge=>{
     const pending=localProposals.get(challenge?.opId);
@@ -197,15 +196,25 @@ Hooks.once('ready',()=>{
   else if(game.user.isGM)askGM('key').then(answer=>saveAutoSecret(answer.secret)).catch(error=>console.warn('[Нити] Ключ GM не получен',error));
 });
 
-async function accept(proposal) {
+function enqueueProposal(proposal,sender){
+  const enqueuedAt=Date.now();
+  const task=queue.then(()=>{
+    if(Date.now()-enqueuedAt>14000)throw Error('Очередь GM занята. Повтори действие.');
+    return accept(proposal,sender);
+  });
+  queue=task.catch(error=>console.warn('[Нити] Операция отклонена',error));
+  return task;
+}
+async function accept(proposal,sender) {
   if(!isLead())throw Error('Нет активного мастера');
   const author=game.users.get(proposal?.authorId);
   if(!author?.active||typeof proposal?.opId!=='string'||!/^[a-zA-Z0-9_-]{8,80}$/.test(proposal.opId))throw Error('Неизвестный автор операции');
   const key=`${author.id}:${proposal.opId}`;
+  if(sender&&sender.id!==author.id)throw Error('Отправитель операции не совпадает с автором');
   if(author.id===game.user.id) {
     if(!confirmsProposal(localProposals.get(proposal.opId),proposal))throw Error('Отправитель не подтвердил операцию');
-  } else {
-    const confirmed=await author.query(CONFIRM,{opId:proposal.opId,proposal},{timeout:10000});
+  } else if(!sender) {
+    const confirmed=await withDeadline(()=>author.query(CONFIRM,{opId:proposal.opId,proposal},{timeout:10000}),10000);
     if(confirmed!==true)throw Error('Отправитель не подтвердил операцию');
   }
   if(results.has(key))return copy(results.get(key));
@@ -236,7 +245,7 @@ async function accept(proposal) {
       let entry=vault.boards.find(item=>item.creationOpId===proposal.opId&&item.ownerId===author.id);
       if(!entry){
         if(vault.boards.length>=100)throw Error('Достигнут лимит личных досок');
-        entry={id:'p-'+crypto.randomUUID().replaceAll('-',''),title,visibility:'private',ownerId:author.id,creationOpId:proposal.opId,state:EMPTY(),views:{}};
+        entry={id:'p-'+operationId(),title,visibility:'private',ownerId:author.id,creationOpId:proposal.opId,state:EMPTY(),views:{}};
         vault.boards.push(entry);await saveVault();
       }
       answer={opId:proposal.opId,kind:'create',boardId:entry.id,meta:{id:entry.id,title:entry.title,visibility:'private',ownerId:entry.ownerId},board:copy(entry.state)};
@@ -245,7 +254,9 @@ async function accept(proposal) {
       if(existing)answer={opId:proposal.opId,kind:'create',boardId:existing.id};
       else {
         if([...game.journal].filter(doc=>boardMeta(doc)?.visibility==='public').length>=100)throw Error('Достигнут лимит общих досок');
-        const doc=await JournalEntry.create({name:title,ownership:boardOwnership('public',author.id),flags:{[ID]:{kind:'board',visibility:'public',ownerId:author.id,creationOpId:proposal.opId,state:EMPTY()}}});
+        const Journal=game.journal.documentClass||globalThis.JournalEntry;
+        if(typeof Journal?.create!=='function')throw Error('Foundry не предоставила API создания доски');
+        const doc=await Journal.create({name:title,ownership:boardOwnership('public',author.id),flags:{[ID]:{kind:'board',visibility:'public',ownerId:author.id,creationOpId:proposal.opId,state:EMPTY()}}});
         answer={opId:proposal.opId,kind:'create',boardId:doc.id};
       }
     }
@@ -298,14 +309,14 @@ async function accept(proposal) {
 }
 
 async function submit(kind,payload={}) {
-  if(activeRequest){post('WARN',{text:'Дождись завершения предыдущего изменения'});return;}
+  if(activeRequest){post(kind==='patch'?'ERROR':'BOARD_ERROR',{text:'Дождись завершения предыдущего изменения',board:copy(board),boardId:currentId});return;}
   const gm=game.users.activeGM;
   if(!gm){post(kind==='patch'?'ERROR':'BOARD_ERROR',{text:'Нет подключённого GM. Изменение не сохранено.',board:copy(board),boardId:currentId});return;}
-  const proposal={opId:crypto.randomUUID().replaceAll('-',''),authorId:game.user.id,kind,...payload};
+  const proposal={opId:operationId(),authorId:game.user.id,kind,...payload};
   localProposals.set(proposal.opId,copy(proposal));activeRequest=true;
   post(kind==='patch'?'SAVING':'BOARD_WORKING',{action:kind});
   try {
-    const answer=isLead()?await accept(proposal):await gm.query(QUERY,proposal,{timeout:20000});
+    const answer=await withDeadline(()=>isLead()?enqueueProposal(proposal,game.user):gm.query(QUERY,proposal,{timeout:15000}));
     if(kind==='patch'){
       if(answer.boardId!==currentId)throw Error('Ответ относится к другой доске');
       board=cleanBoard(answer.board);
@@ -340,6 +351,10 @@ function onFrameMessage(event) {
   if(event.origin!==location.origin||event.source!==frame?.contentWindow||event.data?.niti!==true)return;
   const msg=event.data;
   if(msg.kind==='READY'){showBoard(currentId,{remember:false});post('THEME',{theme:game.settings.get(ID,'theme')});}
+  if(msg.kind==='RESYNC'){
+    if(isPrivateId(currentId))openPrivate(currentId,{remember:false}).catch(error=>post('WARN',{text:error.message}));
+    else showBoard(currentId,{remember:false});
+  }
   if(msg.kind==='UNLOCK_PRIVATE'&&isLead()){
     post('BOARD_WORKING',{action:'unlock'});
     unlockVault({create:true,interactive:true}).then(()=>{
@@ -354,13 +369,13 @@ function onFrameMessage(event) {
   if(msg.kind==='PATCH') {
     if(msg.boardId!==currentId){post('ERROR',{text:'Выбрана другая доска',board:copy(board),boardId:currentId});return;}
     if(activeRequest){post('ERROR',{text:'Дождись подтверждения предыдущего изменения.',board:copy(board),boardId:currentId});return;}
-    submit('patch',{boardId:currentId,patch:msg.patch,base:msg.base,baseRevision:msg.baseRevision});
+    submit('patch',{boardId:currentId,patch:msg.patch,base:msg.base,baseRevision:msg.baseRevision}).catch(error=>post('ERROR',{text:error.message,board:copy(board),boardId:currentId}));
   }
   if(msg.kind==='SWITCH_BOARD'&&!activeRequest){
     if(isPrivateId(msg.boardId))openPrivate(msg.boardId).catch(error=>{post('WARN',{text:error.message});sendList()});
     else showBoard(msg.boardId);
   }
-  if(msg.kind==='BOARD_ACTION'&&!activeRequest)submit(msg.action,{boardId:msg.boardId,baseName:msg.baseName,title:msg.title,visibility:msg.visibility});
+  if(msg.kind==='BOARD_ACTION')submit(msg.action,{boardId:msg.boardId,baseName:msg.baseName,title:msg.title,visibility:msg.visibility}).catch(error=>post('BOARD_ERROR',{text:error.message}));
   if(msg.kind==='VIEW'&&msg.boardId===currentId){
     const view=cleanView(msg.view);if(!view)return;
     if(isPrivateId(currentId))askGM('view',{boardId:currentId,view}).catch(error=>console.warn('[Нити] Камера личной доски не сохранена',error));
@@ -396,7 +411,7 @@ function attachUI() {
     window.addEventListener('pointermove',move,true);window.addEventListener('pointerup',end,true);window.addEventListener('pointercancel',cancel,true);
   });
   const root=document.createElement('section');root.id='niti-board-window';root.hidden=true;
-  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — доски связей <small>0.3.0-beta.3</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Доски Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
+  root.innerHTML=`<div class="niti-window-header"><strong>⌁ Нити — доски связей <small>0.3.0-beta.4</small></strong><button class="niti-shell-button" type="button" data-action="expand" title="Развернуть">▢</button><button class="niti-shell-button" type="button" data-action="close" title="Закрыть">×</button></div><iframe title="Доски Нити"></iframe><div class="niti-drop-overlay">Отпусти Actor, чтобы добавить на доску</div><div class="niti-resize" aria-label="Изменить размер"></div>`;
   document.body.appendChild(root);frame=root.querySelector('iframe');
   fetch('modules/niti-board/ui/board.html',{cache:'no-store'}).then(response=>{if(!response.ok)throw Error(`HTTP ${response.status}`);return response.text()}).then(html=>{
     frame.srcdoc=html.replace('<html lang="ru">','<html lang="ru" data-niti-foundry="true">');

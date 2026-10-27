@@ -40,7 +40,7 @@ const STORAGE='niti-demo-2026-v1';
  const parentOrigin = inFoundry?window.parent.location.origin:location.origin;
 const notifyHost = (kind,payload={})=>{if(inFoundry)window.parent.postMessage({niti:true,kind,...payload},parentOrigin)};
 const isGM=()=>!!(inFoundry&&window.parent.game?.user?.isGM);
- let baseline={nodes:[],edges:[]},revision=0,synchronized=!inFoundry,readOnly=false,busy=false,boardPending=false,currentBoardId='legacy',boards=[];
+ let baseline={nodes:[],edges:[]},revision=0,synchronized=!inFoundry,readOnly=false,busy=false,boardPending=false,currentBoardId='legacy',boards=[],saveTimer,boardTimer;
  const editable=()=>!inFoundry||(synchronized&&!readOnly&&!busy);
  function setStatus(message){const el=$('#saveStatus');if(el)el.textContent=message;document.body.classList.toggle('niti-busy',busy);document.body.classList.toggle('niti-readonly',readOnly)}
 function normalizePatch(p){return {nodes:p.nodes||[],edges:p.edges||[]}}
@@ -83,11 +83,29 @@ function renderBoardList(selectedId=currentBoardId){
   $('#vaultRecovery').hidden=vaultVersion!==2;$('#exportVaultKey').disabled=boardPending;$('#importVaultKey').disabled=boardPending;
 }
 function showToast(message){let t=$('#toast');t.textContent=message;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),2500)}
+function waitForReply(kind){
+ const finish=()=>{busy=false;boardPending=false;render();renderBoardList();setStatus('Нет ответа от GM · действие не подтверждено');showToast('Сервер не подтвердил действие. Проверь подключение и повтори его.');notifyHost('RESYNC')};
+ if(kind==='save'){clearTimeout(saveTimer);saveTimer=setTimeout(finish,20000)}else{clearTimeout(boardTimer);boardTimer=setTimeout(finish,20000)}
+}
+function boardAction(payload){boardPending=true;renderBoardList();waitForReply('board');notifyHost('BOARD_ACTION',payload)}
+function askBoardName(title,value=''){
+ return new Promise(resolve=>{
+  const overlay=document.createElement('div');overlay.className='modal-overlay show';
+  overlay.innerHTML='<form class="modal"><h2></h2><input class="field" name="boardName" maxlength="60" required autocomplete="off"><div class="row"><button type="button" class="btn" data-cancel>Отмена</button><button type="submit" class="btn primary">Сохранить</button></div></form>';
+  overlay.querySelector('h2').textContent=title;const input=overlay.querySelector('input');input.value=value;
+  const finish=result=>{overlay.remove();resolve(result)};
+  overlay.querySelector('[data-cancel]').addEventListener('click',()=>finish(null));
+  overlay.addEventListener('click',event=>{if(event.target===overlay)finish(null)});
+  overlay.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();finish(null)}},true);
+  overlay.querySelector('form').addEventListener('submit',event=>{event.preventDefault();if(input.value.trim())finish(input.value.trim())});
+  document.body.appendChild(overlay);input.focus();input.select();
+ });
+}
 function save(){
  if(inFoundry){if(!editable()){data=JSON.parse(JSON.stringify(baseline));render();showToast('Редактирование сейчас недоступно');return;}
 const patch=patchFrom(baseline,data);if(!patch.nodes.length&&!patch.edges.length)return;
  const base={nodes:patch.nodes.map(op=>({id:op.id,value:baseline.nodes.find(x=>x.id===op.id)||null})),edges:patch.edges.map(op=>({id:op.id,value:baseline.edges.find(x=>x.id===op.id)||null}))};
- busy=true;lockEditor();renderBoardList();setStatus('Сохранение…');notifyHost('PATCH',{boardId:currentBoardId,patch,base,baseRevision:revision});return;}
+ busy=true;lockEditor();renderBoardList();setStatus('Сохранение…');waitForReply('save');notifyHost('PATCH',{boardId:currentBoardId,patch,base,baseRevision:revision});return;}
 try{localStorage.setItem(STORAGE,JSON.stringify(data))}catch{showToast('Места в браузере не хватает. Экспортируй доску в JSON.')}
 }
 function snapshot(){history.push(JSON.stringify(data));if(history.length>35)history.shift();future=[]}
@@ -159,7 +177,7 @@ $('#importFile').addEventListener('change',async event=>{
 });
 function reset(){if(!editable())return;if(inFoundry&&!isGM()){showToast('Очистка доски доступна только мастеру');return;}if(!confirm('Вернуть демонстрационный пример? Текущую доску лучше сначала экспортировать в JSON.'))return;snapshot();data=example();selected=null;render();fit();save();showToast('Пример восстановлен')}
 $('#boardSelect').addEventListener('change',e=>{if(busy){renderBoardList();return}notifyHost('SWITCH_BOARD',{boardId:e.target.value})});
-for(const [id,visibility] of [['newPublic','public'],['newPrivate','private']])$('#'+id).addEventListener('click',()=>{if(!inFoundry||readOnly||busy)return;const title=prompt(visibility==='private'?'Название личной доски':'Название общей доски');if(title?.trim())notifyHost('BOARD_ACTION',{action:'create',title,visibility})});
+for(const [id,visibility] of [['newPublic','public'],['newPrivate','private']])$('#'+id).addEventListener('click',async()=>{if(!inFoundry||readOnly||busy||boardPending)return;const title=await askBoardName(visibility==='private'?'Название личной доски':'Название общей доски');if(title)boardAction({action:'create',title,visibility})});
 $('#unlockPrivate').addEventListener('click',()=>notifyHost('UNLOCK_PRIVATE'));
 $('#exportVaultKey').addEventListener('click',()=>{try{
   if(!isGM())throw Error('Только GM может сохранить ключ');
@@ -172,7 +190,7 @@ $('#exportVaultKey').addEventListener('click',()=>{try{
 }catch(error){showToast(error.message)}});
 $('#importVaultKey').addEventListener('click',()=>$('#vaultKeyFile').click());
 $('#vaultKeyFile').addEventListener('change',async event=>{try{const file=event.target.files?.[0];if(!file||file.size>2000)throw Error('Неверный файл ключа');notifyHost('IMPORT_VAULT_KEY',{payload:JSON.parse(await file.text())})}catch(error){showToast('Не удалось прочитать ключ: '+error.message)}finally{event.target.value=''}});
-$('#renameBoard').addEventListener('click',()=>{const active=boards.find(b=>b.id===currentBoardId);if(!active||active.id==='legacy'||readOnly||busy)return;const title=prompt('Новое название доски',active.title);if(title?.trim()&&title.trim()!==active.title)notifyHost('BOARD_ACTION',{action:'rename',boardId:active.id,baseName:active.title,title})});
+$('#renameBoard').addEventListener('click',async()=>{const active=boards.find(b=>b.id===currentBoardId);if(!active||active.id==='legacy'||readOnly||busy||boardPending)return;const title=await askBoardName('Новое название доски',active.title);if(title&&title!==active.title)boardAction({action:'rename',boardId:active.id,baseName:active.title,title})});
 $('#deleteBoard').addEventListener('click',()=>{const active=boards.find(b=>b.id===currentBoardId);if(!active||active.id==='legacy'||readOnly||busy)return;if(confirm(`Удалить доску «${active.title}» со всеми объектами? Это действие нельзя отменить.`))notifyHost('BOARD_ACTION',{action:'delete',boardId:active.id,baseName:active.title})});
 $('#exportBtn').addEventListener('click',exportBoard);$('#importBtn').addEventListener('click',()=>$('#importFile').click());$('#resetBtn').addEventListener('click',reset);$('#helpBtn').addEventListener('click',()=>$('#helpModal').classList.add('show'));$('#closeHelp').addEventListener('click',()=>$('#helpModal').classList.remove('show'));$('#helpModal').addEventListener('click',e=>{if(e.target.id==='helpModal')e.currentTarget.classList.remove('show')});$('#addNoteTop').addEventListener('click',()=>{const p=centerPoint();newNode('note',p.x-100,p.y-70)});document.querySelectorAll('[data-tool]').forEach(b=>b.addEventListener('click',()=>setTool(b.dataset.tool)));$('#zoomIn').addEventListener('click',()=>setZoom(zoom*1.2));$('#zoomOut').addEventListener('click',()=>setZoom(zoom/1.2));$('#zoomFit').addEventListener('click',fit);
 document.addEventListener('keydown',e=>{let typing=e.target.closest('input,textarea,select')||e.target.isContentEditable;if(e.code==='Space'&&!typing){spaceDown=true;e.preventDefault()}if(typing)return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();return}if(e.key==='Escape'){if($('#helpModal').classList.contains('show')){$('#helpModal').classList.remove('show');return}setTool('select');return}if(['Delete','Backspace'].includes(e.key)&&selected){e.preventDefault();deleteSelected();return}let m={v:'select',c:'card',n:'note',l:'connect',g:'zone'};if(m[e.key.toLowerCase()])setTool(m[e.key.toLowerCase()]);if(e.key.toLowerCase()==='f')fit()});document.addEventListener('keyup',e=>{if(e.code==='Space')spaceDown=false});window.addEventListener('blur',()=>spaceDown=false);window.addEventListener('resize',()=>updateWorld());
@@ -183,11 +201,11 @@ if(inFoundry){
     const m=e.data;
     if(m.kind==='BOARD_LIST'){boards=Array.isArray(m.boards)?m.boards:[];renderBoardList(m.selected);}
     if(m.kind==='STATE'&&m.board&&!busy){const changed=currentBoardId!==m.boardId,first=!synchronized;if(changed){clearTimeout(viewTimer);currentBoardId=m.boardId;viewInitialized=false;}data={nodes:m.board.nodes||[],edges:m.board.edges||[]};baseline=JSON.parse(JSON.stringify(data));revision=m.board.revision||0;synchronized=true;readOnly=!!m.readOnly;selected=null;history=[];future=[];render();if(!viewInitialized&&(changed||first)){if(m.view&&Number.isFinite(m.view.zoom)){zoom=m.view.zoom;pan={x:m.view.panX,y:m.view.panY};viewInitialized=true;updateWorld()}else fit()}renderBoardList(currentBoardId);setStatus(readOnly?'Нет GM · только просмотр':'Сохранено · рев. '+revision);}
-    if(m.kind==='ACK'&&m.board&&m.boardId===currentBoardId){busy=false;if(m.board.revision!==revision+1){history=[];future=[];}data={nodes:m.board.nodes||[],edges:m.board.edges||[]};baseline=JSON.parse(JSON.stringify(data));revision=m.board.revision||0;render();renderBoardList();setStatus('Сохранено · рев. '+revision);}
-    if(m.kind==='ERROR'){busy=false;if(m.board&&m.boardId===currentBoardId){data={nodes:m.board.nodes||[],edges:m.board.edges||[]};baseline=JSON.parse(JSON.stringify(data));revision=m.board.revision||0;}history=[];future=[];render();renderBoardList();setStatus('Ошибка сохранения');showToast(m.text||'Не удалось сохранить');}
-    if(m.kind==='BOARD_WORKING'){boardPending=true;renderBoardList();setStatus('Изменение списка досок…')}
-    if(m.kind==='BOARD_OK'){boardPending=false;renderBoardList();setStatus('Сохранено · рев. '+revision);showToast(({unlock:'Старые личные доски перенесены',backup:'Резервный ключ скачан',restore:'Ключ восстановлен'})[m.action]||'Список досок обновлён')}
-    if(m.kind==='BOARD_ERROR'){boardPending=false;renderBoardList();setStatus(m.text||'Ошибка списка досок');showToast(m.text||'Не удалось изменить доску')}
+    if(m.kind==='ACK'&&m.board&&m.boardId===currentBoardId){clearTimeout(saveTimer);busy=false;if(m.board.revision!==revision+1){history=[];future=[];}data={nodes:m.board.nodes||[],edges:m.board.edges||[]};baseline=JSON.parse(JSON.stringify(data));revision=m.board.revision||0;render();renderBoardList();setStatus('Сохранено · рев. '+revision);}
+    if(m.kind==='ERROR'){clearTimeout(saveTimer);busy=false;if(m.board&&m.boardId===currentBoardId){data={nodes:m.board.nodes||[],edges:m.board.edges||[]};baseline=JSON.parse(JSON.stringify(data));revision=m.board.revision||0;}history=[];future=[];render();renderBoardList();setStatus('Ошибка сохранения');showToast(m.text||'Не удалось сохранить');}
+    if(m.kind==='BOARD_WORKING'){boardPending=true;waitForReply('board');renderBoardList();setStatus('Изменение списка досок…')}
+    if(m.kind==='BOARD_OK'){clearTimeout(boardTimer);boardPending=false;renderBoardList();setStatus('Сохранено · рев. '+revision);showToast(({unlock:'Старые личные доски перенесены',backup:'Резервный ключ скачан',restore:'Ключ восстановлен'})[m.action]||'Список досок обновлён')}
+    if(m.kind==='BOARD_ERROR'){clearTimeout(boardTimer);boardPending=false;renderBoardList();setStatus(m.text||'Ошибка списка досок');showToast(m.text||'Не удалось изменить доску')}
     if(m.kind==='AVAILABILITY'){const changed=readOnly!==!!m.readOnly;readOnly=!!m.readOnly;renderBoardList();lockEditor();if(changed&&!busy)setStatus(readOnly?'Нет GM · только просмотр':'Сохранено · рев. '+revision);}
     if(m.kind==='THEME')document.body.dataset.theme=m.theme==='fantasy'?'fantasy':'gothic';
     if(m.kind==='OPEN'&&!viewInitialized)fit();
